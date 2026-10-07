@@ -43,6 +43,7 @@ import com.twilio.twilio_voice.types.TVNativeCallEvents
 import com.twilio.twilio_voice.types.TelecomManagerExtension.canReadPhoneNumbers
 import com.twilio.twilio_voice.types.TelecomManagerExtension.getPhoneAccountHandle
 import com.twilio.twilio_voice.types.TelecomManagerExtension.hasCallCapableAccount
+import com.twilio.twilio_voice.types.TelecomManagerExtension.hasSelfManagedAccount
 import com.twilio.twilio_voice.types.TelecomManagerExtension.openPhoneAccountSettings
 import com.twilio.twilio_voice.types.TelecomManagerExtension.registerPhoneAccount
 import com.twilio.voice.Call
@@ -851,21 +852,9 @@ class TwilioVoicePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamH
                 logEvent("hasRegisteredPhoneAccount")
                 context?.let { ctx ->
                     telecomManager?.let { tm ->
-                        if (!tm.canReadPhoneNumbers(ctx)) {
-                            Log.e(
-                                TAG,
-                                "No read phone state permission, call `requestReadPhoneStatePermission()` first"
-                            )
-                            result.success(false)
-                            return;
-                        }
-
-                        // Get phone account handle
-                        val phoneAccountHandle = tm.getPhoneAccountHandle(ctx)
-
-                        // Get PhoneAccount, if null it's not registered
-                        val phoneAccount = tm.getPhoneAccount(phoneAccountHandle)
-                        result.success(phoneAccount != null)
+                        // Self-managed account owned by this app — readable without
+                        // READ_PHONE_NUMBERS (see hasSelfManagedAccount).
+                        result.success(tm.hasSelfManagedAccount(ctx))
                     } ?: run {
                         Log.e(TAG, "Context is null, cannot check if registered phone account")
                         result.success(false)
@@ -1223,22 +1212,23 @@ class TwilioVoicePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamH
         assert(connect || !from.isNullOrEmpty()) { "From cannot be empty" }
 
         telecomManager?.let { tm ->
-            if (!tm.hasCallCapableAccount(ctx, TVConnectionService::class.java.name)) {
-                Log.e(TAG, "No registered phone account, call `registerPhoneAccount()` first")
-                return false
+            // KlickRing self-managed model: ensure our self-managed PhoneAccount is
+            // registered (idempotent, needs no user action) rather than requiring a
+            // user-enabled CALL_PROVIDER "calling account". A self-managed account
+            // isn't listed by getCallCapablePhoneAccounts(), so the old
+            // hasCallCapableAccount() gate would always fail here.
+            if (!tm.hasSelfManagedAccount(ctx)) {
+                Log.i(TAG, "placeCall: self-managed phone account not registered yet, registering")
+                tm.registerPhoneAccount(ctx, tm.getPhoneAccountHandle(ctx))
             }
             if (!checkMicrophonePermission()) {
                 Log.e(TAG, "No microphone permission, call `requestMicrophonePermission()` first")
                 return false
             }
-            if (!checkReadPhoneNumbersPermission()) {
-                Log.e(TAG, "No read phone state permission, call `requestReadPhoneStatePermission()` first")
-                return false
-            }
-            if (!checkCallPhonePermission()) {
-                Log.e(TAG, "No call phone permission, call `requestCallPhonePermission()` first")
-                return false
-            }
+            // Self-managed calling requires only MANAGE_OWN_CALLS — NOT CALL_PHONE,
+            // READ_PHONE_STATE or READ_PHONE_NUMBERS (those are for SIM/CALL_PROVIDER
+            // accounts). Requiring them would trigger needless runtime prompts and
+            // Play-review scrutiny for a VoIP app that never touches the dialer.
             if (!checkManageOwnCallsPermission()) {
                 Log.e(TAG, "No manage own calls permission, call `requestManageOwnCallsPermission()` first")
                 return false
@@ -1307,50 +1297,15 @@ class TwilioVoicePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamH
     }
 
     /**
-     * Attempts to register a [PhoneAccount] with the Telecom app.
-     * Requires permissions:
-     *  - [Manifest.permission.READ_PHONE_STATE]: for checking call capable accounts
-     *  - [Manifest.permission.READ_PHONE_NUMBERS]: for getting the phone account via the handle.
+     * Registers this app's SELF-MANAGED [PhoneAccount] with the Telecom app.
+     * Self-managed registration needs no phone permissions (only MANAGE_OWN_CALLS
+     * at call time) and no user enablement, so this just (idempotently) registers
+     * the account and reports success.
      */
-    @SuppressLint("MissingPermission")
-    @RequiresPermission(allOf = [Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_PHONE_NUMBERS])
     private fun registerPhoneAccount(): Boolean {
         context?.let { ctx ->
             telecomManager?.let { tm ->
-                // Get PhoneAccountHandle
                 val phoneAccountHandle = tm.getPhoneAccountHandle(ctx)
-
-                if (!tm.canReadPhoneNumbers(ctx)) {
-                    Log.e(TAG, "hasRegisteredPhoneAccount: No read phone numbers permission, call `requestReadPhoneNumbersPermission()` first")
-                    return false;
-                }
-
-                // Get PhoneAccount, if null it's not registered
-                val phoneAccount = tm.getPhoneAccount(phoneAccountHandle)
-                if (phoneAccount != null) {
-                    if (!phoneAccount.isEnabled) {
-                        Log.e(
-                            TVConnectionService.TAG,
-                            "onStartCommand: PhoneAccount is not enabled, prompt the user to enable the phone account by opening settings with `openPhoneAccountSettings()`"
-                        )
-                        return true
-                    }
-
-                    // account is ready to use
-                    return true
-                }
-
-                // Get telecom manager
-//                if (!tm.canReadPhoneState(ctx)) {
-//                    Log.e(TAG,"onStartCommand: Permission for READ_PHONE_STATE not granted or requested, call `requestReadPhoneStatePermission()` first")
-//                    return false
-//                }
-
-                if (tm.hasCallCapableAccount(ctx, phoneAccountHandle.componentName.className)) {
-                    Log.w(TAG, "registerPhoneAccount: Phone account already registered, re-registering anyway")
-//                    return true
-                }
-
                 tm.registerPhoneAccount(ctx, phoneAccountHandle)
                 return true;
             } ?: run {
@@ -1658,25 +1613,18 @@ class TwilioVoicePlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamH
     }
 
     /**
-     * Checks if a [PhoneAccount] is registered with the Telecom app, and is enabled.
-     * Requires permissions:
-     * - [Manifest.permission.READ_PHONE_NUMBERS]: for getting the phone account via the handle.
+     * Whether this app's self-managed [PhoneAccount] is ready to place calls.
+     * Self-managed accounts are enabled the moment they are registered (there is
+     * no user "calling account" toggle), so this is simply "is it registered?",
+     * registering it if not. Needs no phone permissions.
      */
-    @RequiresPermission(allOf = [Manifest.permission.READ_PHONE_NUMBERS])
     private fun checkIsPhoneAccountEnabled(): Boolean {
         context?.let { ctx ->
             telecomManager?.let { tm ->
-                // Get PhoneAccountHandle
-                val phoneAccountHandle = tm.getPhoneAccountHandle(ctx)
-
-                if (!tm.canReadPhoneNumbers(ctx)) {
-                    Log.e(TAG, "hasRegisteredPhoneAccount: No read phone numbers permission, call `requestReadPhoneNumbersPermission()` first")
-                    return false;
+                if (!tm.hasSelfManagedAccount(ctx)) {
+                    tm.registerPhoneAccount(ctx, tm.getPhoneAccountHandle(ctx))
                 }
-
-                return tm.getPhoneAccount(phoneAccountHandle).let {
-                    it != null && it.isEnabled;
-                }
+                return tm.hasSelfManagedAccount(ctx)
             } ?: run {
                 Log.e(TAG, "Telecom Manager is null, cannot check if registered phone account")
                 return false

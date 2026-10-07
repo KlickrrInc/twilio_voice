@@ -32,14 +32,7 @@ object TelecomManagerExtension {
      *  @param label The label for the phone account
      *  @param shortDescription The short description for the phone account
      */
-    @RequiresPermission(value = "android.permission.READ_PHONE_STATE")
     fun TelecomManager.registerPhoneAccount(ctx: Context, phoneAccountHandle: PhoneAccountHandle) {
-        if (hasCallCapableAccount(ctx, phoneAccountHandle.componentName.className)) {
-            // phone account already registered
-            Log.d("TelecomManager", "registerPhoneAccount: phone account already re-registering.")
-//            return
-        }
-
         val label = ctx.getString(R.string.phone_account_name).ifEmpty {
             ctx.appName
         }
@@ -47,15 +40,35 @@ object TelecomManagerExtension {
             "Provides calling services for $label"
         }
 
-        // register phone account
+        // KlickRing: register a SELF-MANAGED PhoneAccount (the model WhatsApp /
+        // Google Meet / Slack use). A self-managed account needs NO user action —
+        // unlike CALL_PROVIDER accounts it is enabled the moment it is registered
+        // and never appears in the system "Calling accounts" settings toggle, so
+        // the very first call connects. It requires only MANAGE_OWN_CALLS (not
+        // CALL_PHONE / READ_PHONE_STATE / READ_PHONE_NUMBERS). Registering is
+        // idempotent: re-registering the same handle simply refreshes it.
         val phoneAccount = PhoneAccount.builder(phoneAccountHandle, label)
-            .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER or PhoneAccount.CAPABILITY_CONNECTION_MANAGER or PhoneAccount.CAPABILITY_CALL_SUBJECT)
+            .setCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED)
             .setShortDescription(description)
             .setIcon(Icon.createWithResource(ctx, ctx.applicationInfo.icon))
             .addSupportedUriScheme(PhoneAccount.SCHEME_TEL)
             .build()
 
         registerPhoneAccount(phoneAccount)
+    }
+
+    /**
+     * Whether this app's own (self-managed) PhoneAccount is registered with Telecom.
+     * Self-managed accounts owned by the caller are readable without
+     * READ_PHONE_NUMBERS; any SecurityException is treated as "not registered".
+     */
+    fun TelecomManager.hasSelfManagedAccount(ctx: Context): Boolean {
+        return try {
+            getPhoneAccount(getPhoneAccountHandle(ctx)) != null
+        } catch (e: SecurityException) {
+            Log.w("TelecomManager", "hasSelfManagedAccount: ${e.message}")
+            false
+        }
     }
 
     fun TelecomManager.openPhoneAccountSettings(activity: Activity) {

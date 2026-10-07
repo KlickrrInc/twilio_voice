@@ -33,6 +33,7 @@ import com.twilio.twilio_voice.types.ContextExtension.hasMicrophoneAccess
 import com.twilio.twilio_voice.types.IntentExtension.getParcelableExtraSafe
 import com.twilio.twilio_voice.types.TelecomManagerExtension.getPhoneAccountHandle
 import com.twilio.twilio_voice.types.TelecomManagerExtension.hasCallCapableAccount
+import com.twilio.twilio_voice.types.TelecomManagerExtension.hasSelfManagedAccount
 import com.twilio.twilio_voice.types.TelecomManagerExtension.canReadPhoneState
 import com.twilio.twilio_voice.types.TelecomManagerExtension.registerPhoneAccount
 import com.twilio.twilio_voice.types.ValueBundleChanged
@@ -327,38 +328,13 @@ class TVConnectionService : ConnectionService() {
                     }
 
                     val telecomManager = getSystemService(TELECOM_SERVICE) as TelecomManager
-                    if (!telecomManager.canReadPhoneState(applicationContext)) {
-                        Log.e(TAG, "onCallInvite: Permission to read phone state not granted or requested.")
-                        callInvite.reject(applicationContext)
-                        onConnectionEnded(null)
-                        return@let
-                    }
-
+                    // Self-managed: ensure our (toggle-free) PhoneAccount is
+                    // registered, then ring. No READ_PHONE_STATE / "enabled" /
+                    // call-capable gates — those apply to CALL_PROVIDER accounts.
                     val phoneAccountHandle = telecomManager.getPhoneAccountHandle(applicationContext)
-                    val phoneAccount = telecomManager.getPhoneAccount(phoneAccountHandle)
-                    if(phoneAccount == null) {
-                        Log.e(TAG, "onStartCommand: PhoneAccount is null, make sure to register one with `registerPhoneAccount()`")
-                        onConnectionEnded(null)
-                        return@let
-                    }
-                    if(!phoneAccount.isEnabled) {
-                        Log.e(TAG, "onStartCommand: PhoneAccount is not enabled, prompt the user to enable the phone account by opening settings with `openPhoneAccountSettings()`")
-                        onConnectionEnded(null)
-                        return@let
-                    }
-
-                    // Get telecom manager
-                    if (!telecomManager.hasCallCapableAccount(applicationContext, phoneAccountHandle.componentName.className)) {
-                        Log.e(
-                            TAG, "onCallInvite: No registered phone account for PhoneHandle $phoneAccountHandle.\n" +
-                                    "Check the following:\n" +
-                                    "- Have you requested READ_PHONE_STATE permissions\n" +
-                                    "- Have you registered a PhoneAccount \n" +
-                                    "- Have you activated the Calling Account?"
-                        )
-                        callInvite.reject(applicationContext)
-                        onConnectionEnded(null)
-                        return@let
+                    if (!telecomManager.hasSelfManagedAccount(applicationContext)) {
+                        Log.i(TAG, "onCallInvite: self-managed phone account not registered yet, registering")
+                        telecomManager.registerPhoneAccount(applicationContext, phoneAccountHandle)
                     }
 
                     pendingCallInvites[callInvite.callSid] = callInvite
@@ -448,29 +424,14 @@ class TVConnectionService : ConnectionService() {
                     val telecomManager = getSystemService(TELECOM_SERVICE) as TelecomManager
                     val phoneAccountHandle = telecomManager.getPhoneAccountHandle(applicationContext)
 
-                    if (!telecomManager.canReadPhoneState(applicationContext)) {
-                        Log.e(TAG, "onStartCommand: Missing READ_PHONE_STATE permission")
-                        return@let
-                    }
-
-                    val phoneAccount = telecomManager.getPhoneAccount(phoneAccountHandle)
-                    if(phoneAccount == null) {
-                        Log.e(TAG, "onStartCommand: PhoneAccount is null, make sure to register one with `registerPhoneAccount()`")
-                        return@let
-                    }
-                    if(!phoneAccount.isEnabled) {
-                        Log.e(TAG, "onStartCommand: PhoneAccount is not enabled, prompt the user to enable the phone account by opening settings with `openPhoneAccountSettings()`")
-                        return@let
-                    }
-
-                    if (!telecomManager.hasCallCapableAccount(applicationContext, phoneAccountHandle.componentName.className)) {
-                        Log.e(TAG, "onStartCommand: No registered phone account for PhoneHandle $phoneAccountHandle")
+                    // Self-managed: (idempotently) ensure the toggle-free account is
+                    // registered, then require only MANAGE_OWN_CALLS. No
+                    // READ_PHONE_STATE / account-"enabled" / CALL_PHONE gates — those
+                    // are for SIM / CALL_PROVIDER accounts and a self-managed VoIP app
+                    // neither needs nor should request them.
+                    if (!telecomManager.hasSelfManagedAccount(applicationContext)) {
+                        Log.i(TAG, "onStartCommand: self-managed phone account not registered yet, registering")
                         telecomManager.registerPhoneAccount(applicationContext, phoneAccountHandle)
-                    }
-
-                    if (!applicationContext.hasCallPhonePermission()) {
-                        Log.e(TAG, "onStartCommand: Missing CALL_PHONE permission, request permission with `requestCallPhonePermission()`")
-                        return@let
                     }
 
                     if (!applicationContext.hasManageOwnCallsPermission()) {

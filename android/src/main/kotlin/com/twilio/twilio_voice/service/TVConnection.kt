@@ -145,6 +145,12 @@ open class TVCallConnection(
         this.onAction = onAction
         audioModeIsVoip = true
         connectionCapabilities = CAPABILITY_MUTE or CAPABILITY_HOLD or CAPABILITY_SUPPORT_HOLD
+        // KlickRing: this is a self-managed VoIP ConnectionService (like WhatsApp /
+        // Meet / Slack). The owning PhoneAccount is registered with
+        // CAPABILITY_SELF_MANAGED, so every Connection it creates MUST declare
+        // PROPERTY_SELF_MANAGED or Telecom rejects it with a SecurityException. This
+        // is what lets calls start with no "calling account" toggle in Settings.
+        connectionProperties = PROPERTY_SELF_MANAGED
     }
 
     fun setOnCallDisconnected(handler: CompletionHandler<DisconnectCause>) {
